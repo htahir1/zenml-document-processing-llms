@@ -8,3 +8,5 @@ Pillow>=10.2.0
 # plotly>=5.18.0
 # pandas>=2.2.0
 # python-poppler>=0.4.1
+byaldi
+weave
