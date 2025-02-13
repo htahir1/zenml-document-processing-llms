@@ -1,0 +1,4 @@
+wandb
+llama_index
+pydantic
+zenml
