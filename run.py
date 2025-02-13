@@ -12,7 +12,7 @@ from zenml.types import HTMLString
 
 llm = OpenAI(model="gpt-4o")
 
-WANDB_PROJECT = "zenml-document-processing-llms"
+WANDB_PROJECT = "zenml_llms"
 
 CONTRACT_EXTRACT_PROMPT = PromptTemplate(
     """\
