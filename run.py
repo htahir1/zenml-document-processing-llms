@@ -1,3 +1,4 @@
+import weave
 from typing import Annotated, List, Optional, Tuple
 
 from llama_index.core import SimpleDirectoryReader, VectorStoreIndex
@@ -121,11 +122,12 @@ class ComplianceReport(BaseModel):
 
 
 # ZenML steps
-@step
+@step(experiment_tracker="wandb_weave")
 def ingest_contract(
     contract_path: str,
 ) -> Annotated[List[Document], "contract_documents"]:
     """Load and parse contract document using local parser"""
+    weave.init(project_name="zenml_llms")
     documents = SimpleDirectoryReader(input_files=[contract_path]).load_data()
     # Log the document metadata
     log_metadata(
@@ -138,21 +140,23 @@ def ingest_contract(
     return documents
 
 
-@step
+@step(experiment_tracker="wandb_weave")
 def ingest_guidelines(
     guidelines_path: str = "data/gdpr.pdf",
 ) -> Annotated[VectorStoreIndex, "guidelines_index"]:
     """Create local vector store for guidelines"""
+    weave.init(project_name="zenml_llms")
     documents = SimpleDirectoryReader(input_files=[guidelines_path]).load_data()
     index = VectorStoreIndex.from_documents(documents)
     return index
 
 
-@step
+@step(experiment_tracker="wandb_weave")
 def extract_clauses(
     documents: Annotated[List[Document], "contract_documents"],
 ) -> Annotated[ContractExtraction, "extracted_contract_data"]:
     """Extract structured clauses from contract text"""
+    weave.init(project_name="zenml_llms")
     contract_text = "\n".join([d.text for d in documents])
     # Log the prompt being used
     log_metadata(
@@ -175,11 +179,12 @@ def extract_clauses(
     return prediction
 
 
-@step
+@step(experiment_tracker="wandb_weave")
 def process_clauses(
     extraction: ContractExtraction, index: VectorStoreIndex, similarity_top_k: int = 2
 ) -> Annotated[List[ClauseComplianceCheck], "compliance_check_results"]:
     """Process each clause through compliance checks using local vector store"""
+    weave.init(project_name="zenml_llms")
     retriever = VectorIndexRetriever(index=index, similarity_top_k=similarity_top_k)
 
     # Log compliance check prompt
