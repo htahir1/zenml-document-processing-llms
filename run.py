@@ -12,6 +12,8 @@ from zenml.types import HTMLString
 
 llm = OpenAI(model="gpt-4o")
 
+WANDB_PROJECT = "zenml-document-processing-llms"
+
 CONTRACT_EXTRACT_PROMPT = PromptTemplate(
     """\
 You are given contract data below. \
@@ -127,7 +129,7 @@ def ingest_contract(
     contract_path: str,
 ) -> Annotated[List[Document], "contract_documents"]:
     """Load and parse contract document using local parser"""
-    weave.init(project_name="zenml_llms")
+    weave.init(project_name=WANDB_PROJECT)
     documents = SimpleDirectoryReader(input_files=[contract_path]).load_data()
     # Log the document metadata
     log_metadata(
@@ -145,7 +147,7 @@ def ingest_guidelines(
     guidelines_path: str = "data/gdpr.pdf",
 ) -> Annotated[VectorStoreIndex, "guidelines_index"]:
     """Create local vector store for guidelines"""
-    weave.init(project_name="zenml_llms")
+    weave.init(project_name=WANDB_PROJECT)
     documents = SimpleDirectoryReader(input_files=[guidelines_path]).load_data()
     index = VectorStoreIndex.from_documents(documents)
     return index
@@ -156,7 +158,7 @@ def extract_clauses(
     documents: Annotated[List[Document], "contract_documents"],
 ) -> Annotated[ContractExtraction, "extracted_contract_data"]:
     """Extract structured clauses from contract text"""
-    weave.init(project_name="zenml_llms")
+    weave.init(project_name=WANDB_PROJECT)
     contract_text = "\n".join([d.text for d in documents])
     # Log the prompt being used
     log_metadata(
@@ -184,7 +186,7 @@ def process_clauses(
     extraction: ContractExtraction, index: VectorStoreIndex, similarity_top_k: int = 2
 ) -> Annotated[List[ClauseComplianceCheck], "compliance_check_results"]:
     """Process each clause through compliance checks using local vector store"""
-    weave.init(project_name="zenml_llms")
+    weave.init(project_name=WANDB_PROJECT)
     retriever = VectorIndexRetriever(index=index, similarity_top_k=similarity_top_k)
 
     # Log compliance check prompt
@@ -201,22 +203,45 @@ def process_clauses(
     }
 
     for clause in extraction.clauses:
-        # Retrieve relevant guidelines
-        guideline_docs = retriever.retrieve(clause.clause_text)
-        guidelines = "\n".join([d.text for d in guideline_docs])
+        try:
+            # Retrieve relevant guidelines
+            guideline_docs = retriever.retrieve(clause.clause_text)
+            guidelines = "\n".join([d.text for d in guideline_docs])
 
-        # Check compliance
-        compliance_check = llm.structured_predict(
-            ClauseComplianceCheck,
-            CONTRACT_MATCH_PROMPT,
-            clause_text=clause.clause_text,
-            guideline_text=guidelines,
-        )
-        results.append(compliance_check)
+            # Check compliance
+            compliance_check = llm.structured_predict(
+                ClauseComplianceCheck,
+                CONTRACT_MATCH_PROMPT,
+                clause_text=clause.clause_text,
+                guideline_text=guidelines,
+            )
 
-        # Update stats
-        clause_stats["processed_clauses"] += 1
-        if not compliance_check.compliant:
+            # Validate that we got a proper ClauseComplianceCheck object
+            if not isinstance(compliance_check, ClauseComplianceCheck):
+                # Create a default object if the prediction failed
+                compliance_check = ClauseComplianceCheck(
+                    clause_text=clause.clause_text,
+                    compliant=False,
+                    notes="Failed to properly analyze compliance",
+                )
+
+            results.append(compliance_check)
+
+            # Update stats
+            clause_stats["processed_clauses"] += 1
+            if not compliance_check.compliant:
+                clause_stats["non_compliant_clauses"] += 1
+
+        except Exception as e:
+            # Handle any errors gracefully
+            print(f"Error processing clause: {str(e)}")
+            compliance_check = ClauseComplianceCheck(
+                clause_text=clause.clause_text,
+                compliant=False,
+                notes=f"Error during compliance check: {str(e)}",
+            )
+            results.append(compliance_check)
+            clause_stats["processed_clauses"] += 1
             clause_stats["non_compliant_clauses"] += 1
 
     # Log clause processing stats
@@ -301,4 +326,6 @@ def contract_review_pipeline():
 
 
 if __name__ == "__main__":
-    contract_review_pipeline()
+    contract_review_pipeline.with_options(
+        config_path="configs/agent.yaml",
+    )()
