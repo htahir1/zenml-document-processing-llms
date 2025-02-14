@@ -33,3 +33,5 @@ settings:
       WANDB_PROJECT: "zenml_llms"
       HF_HOME: "/tmp/huggingface"
       HF_HUB_CACHE: "/tmp/huggingface"
+      OPENAI_API_KEY: "{{openai_key}}"
+      TEST: "test"
