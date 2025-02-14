@@ -5,33 +5,31 @@ orchestrator:
     pod_settings:
       resources:
         requests:
-          cpu: "2"
-          memory: "4Gi"
-        limits:
-          cpu: "4"
-          memory: "8Gi"
+          cpu: "1"
+          memory: "1Gi"
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: gpu
+                    operator: In
+                    values: ["yes"]
+    orchestrator_pod_settings:
+      resources:
+        requests:
+          cpu: "1"
+          memory: "1Gi"
 
 # Docker configuration
 settings:
   docker:
-    # System requirements for the Docker image
+    requirements: "requirements.txt"
     apt_packages:
-      - build-essential
-      - git
-      - poppler-utils  # For PDF processing
-    # Python requirements
-    requirements:
-      - llama-index>=0.10.0
-      - openai>=1.0.0
-      - weave
-      - wandb
-      - torch
-      - transformers
-      - pdf2image
-      - pytesseract
-      - pillow
-
-    # Environment variables that will be available in the container
+      - poppler-utils
+    python_package_installer: "uv"
     environment:
-      OPENAI_API_KEY: "{{openai_key}}"  # Will be fetched from ZenML secrets
-      TEST: "test"
+      ZENML_ENABLE_RICH_TRACEBACK: false
+      WANDB_PROJECT: "zenml_llms"
+      HF_HOME: "/tmp/huggingface"
+      HF_HUB_CACHE: "/tmp/huggingface"

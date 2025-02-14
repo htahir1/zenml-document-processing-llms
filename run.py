@@ -20,11 +20,7 @@ from pydantic import BaseModel, Field
 from rich import print
 from zenml import log_metadata, pipeline, step
 from zenml.client import Client
-from zenml.config import DockerSettings
 from zenml.types import HTMLString
-from zenml.integrations.kubernetes.flavors.kubernetes_orchestrator_flavor import (
-    KubernetesOrchestratorSettings,
-)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -644,59 +640,7 @@ def generate_report(
     return report, generate_html_report(report, checks, soc2_analysis)
 
 
-docker_settings = DockerSettings(
-    requirements="requirements.txt",
-    apt_packages=["poppler-utils"],
-    python_package_installer="uv",
-    environment={
-        "ZENML_ENABLE_RICH_TRACEBACK": False,
-        "WANDB_PROJECT": WANDB_PROJECT,
-        "HF_HOME": "/tmp/huggingface",
-        "HF_HUB_CACHE": "/tmp/huggingface",
-    },
-)
-
-
-kubernetes_settings = KubernetesOrchestratorSettings(
-    pod_settings={
-        "resources": {
-            "requests": {
-                "cpu": "1",
-                "memory": "1Gi",
-            },
-        },
-        "affinity": {
-            "nodeAffinity": {
-                "requiredDuringSchedulingIgnoredDuringExecution": {
-                    "nodeSelectorTerms": [
-                        {
-                            "matchExpressions": [
-                                {"key": "gpu", "operator": "In", "values": ["yes"]}
-                            ]
-                        }
-                    ]
-                }
-            }
-        },
-    },
-    orchestrator_pod_settings={
-        "resources": {
-            "requests": {
-                "cpu": "1",
-                "memory": "1Gi",
-            },
-        },
-    },
-)
-
-
-@pipeline(
-    settings={
-        "docker": docker_settings,
-        "orchestrator": kubernetes_settings,
-    },
-    enable_cache=False,
-)
+@pipeline(enable_cache=False)
 def contract_review_pipeline(
     contract_path: str = "data/vendor_agreement.md", soc2_path: Optional[str] = None
 ):
@@ -706,7 +650,6 @@ def contract_review_pipeline(
     extraction = extract_clauses(contract_docs)
     checks = process_clauses(extraction, guideline_index)
 
-    # Optional SOC2 analysis
     soc2_analysis = None
     if soc2_path:
         soc2_analysis = analyze_soc2_report(soc2_path)
@@ -717,6 +660,5 @@ def contract_review_pipeline(
 
 if __name__ == "__main__":
     contract_review_pipeline.with_options(config_path="configs/agent.yaml")(
-        contract_path="data/vendor_agreement.md",
-        soc2_path="data/kolide-soc2.pdf",
+        contract_path="data/vendor_agreement.md", soc2_path="data/kolide-soc2.pdf"
     )
