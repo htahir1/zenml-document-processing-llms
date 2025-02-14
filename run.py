@@ -185,7 +185,9 @@ def analyze_soc2_report(
 
                     for result in results:
                         # Get the page number and encode image as base64
-                        page_num = result.page_num - 1  # Convert to 0-based index
+                        page_num = (
+                            result.get("page_num") - 1
+                        )  # Convert to 0-based index
                         resized_image = images[page_num].copy()
                         resized_image.thumbnail((128, 128))
                         base64_image = encode_image_to_base64(resized_image)
@@ -219,7 +221,7 @@ def analyze_soc2_report(
                             {
                                 "query": query,
                                 "findings": response,
-                                "page_num": result.page_num,
+                                "page_num": result.get("page_num"),
                             }
                         )
                         logger.debug(
