@@ -1,21 +1,21 @@
-# ACME Vendor Agreement
+# Kolide Vendor Agreement
 
 **Effective Date:** January 1, 2024
 
 ## Parties:
 - **Client:** LlamaCo ("Client")
-- **Vendor:** ACME Office Supply, Inc. ("Vendor")
+- **Vendor:** Kolide, Inc. ("Vendor")
 
 ## 1. Overview
 
-This Vendor Agreement ("Agreement") sets forth the terms and conditions under which ACME Office Supply, Inc. will provide office supplies, consumables, related goods ("Products"), and associated data processing services to LlamaCo.
+This Vendor Agreement ("Agreement") sets forth the terms and conditions under which Kolide, Inc. will provide office supplies, consumables, related goods ("Products"), and associated data processing services to LlamaCo.
 
 ## 2. Definitions
 
 - **Personal Data:** Any information relating to an identified or identifiable natural person ('data subject').
 - **Processing:** Any operation performed on Personal Data, including collection, storage, modification, transfer, or deletion.
 - **Data Controller:** LlamaCo, who determines the purposes and means of processing Personal Data.
-- **Data Processor:** ACME Office Supply, Inc., who processes Personal Data on behalf of the Controller.
+- **Data Processor:** Kolide, Inc., who processes Personal Data on behalf of the Controller.
 
 ## 3. Data Protection and Privacy
 
@@ -116,7 +116,7 @@ Name: [Authorized Representative]
 Title: [Title]  
 Date: ______________________
 
-**ACME Office Supply, Inc.**
+**Kolide, Inc.**
 
 By: ________________________  
 Name: [Authorized Representative]  

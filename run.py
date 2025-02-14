@@ -1,6 +1,10 @@
 import weave
 from typing import Annotated, List, Optional, Tuple
-
+from datetime import datetime
+import torch
+import logging
+from pdf2image import convert_from_path
+from transformers import MllamaForConditionalGeneration, AutoProcessor
 from llama_index.core import SimpleDirectoryReader, VectorStoreIndex
 from llama_index.core.prompts import PromptTemplate
 from llama_index.core.retrievers import VectorIndexRetriever
@@ -9,10 +13,301 @@ from llama_index.llms.openai import OpenAI
 from pydantic import BaseModel, Field
 from zenml import pipeline, step, log_metadata
 from zenml.types import HTMLString
+from byaldi import RAGMultiModalModel
 
-llm = OpenAI(model="gpt-4o")
+# Set up logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+handler.setFormatter(
+    logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+)
+logger.addHandler(handler)
+
+llm = OpenAI(model="gpt-4")
 
 WANDB_PROJECT = "zenml-document-processing-llms"
+
+# Initialize vision model and processor globally for reuse
+vision_model = MllamaForConditionalGeneration.from_pretrained(
+    "meta-llama/Llama-3.2-11B-Vision-Instruct",
+    torch_dtype=torch.bfloat16,
+    device_map="auto",
+)
+vision_processor = AutoProcessor.from_pretrained(
+    "meta-llama/Llama-3.2-11B-Vision-Instruct"
+)
+
+
+# SOC2 Analysis Models
+class SOC2Finding(BaseModel):
+    """Represents a single finding from SOC2 analysis"""
+
+    area: str = Field(
+        ..., description="Technical area (e.g., 'Data Encryption', 'Access Control')"
+    )
+    finding: str = Field(..., description="Description of the specific finding")
+    risk_level: str = Field(..., description="Risk level: 'Low', 'Medium', 'High'")
+    gdpr_relevance: str = Field(
+        ..., description="How this finding relates to GDPR compliance"
+    )
+
+
+class SOC2AnalysisResult(BaseModel):
+    """Complete SOC2 analysis results"""
+
+    vendor_name: str = Field(..., description="Name of the vendor from SOC2 report")
+    analysis_date: str = Field(..., description="Date of analysis")
+    report_period: str = Field(..., description="Period covered by SOC2 report")
+    key_findings: List[SOC2Finding] = Field(..., description="List of key findings")
+    overall_risk_assessment: str = Field(
+        ..., description="Overall risk assessment summary"
+    )
+
+
+# Add SOC2 Analysis Prompts
+SOC2_FINDING_PROMPT = PromptTemplate(
+    """\
+Analyze the following findings about {area} from a SOC2 report and create a structured finding.
+Focus on GDPR relevance and assess the risk level.
+
+Findings from pages {pages}:
+{findings}
+
+Create a finding that includes:
+1. A clear description of the control or measure
+2. Its relevance to GDPR compliance
+3. A risk assessment (Low/Medium/High)
+"""
+)
+
+
+@step(experiment_tracker="wandb_weave")
+def analyze_soc2_report(
+    soc2_path: str,
+) -> Annotated[SOC2AnalysisResult, "soc2_analysis"]:
+    """Analyze SOC2 report using Colpali RAG and Llama 3.2 Vision model"""
+    weave.init(project_name=WANDB_PROJECT)
+
+    logger.info(f"Starting SOC2 analysis for {soc2_path}")
+
+    # Convert PDF to images
+    images = convert_from_path(soc2_path)
+    logger.info(f"Converted PDF to {len(images)} images")
+
+    # Initialize Colpali RAG
+    rag = RAGMultiModalModel.from_pretrained("vidore/colpali")
+    rag.index(
+        input_path=soc2_path,
+        index_name="soc2_analysis",
+        overwrite=True,
+    )
+    logger.info("Initialized RAG model and indexed document")
+
+    # Standard queries for SOC2 analysis
+    queries = {
+        "encryption": [
+            "What encryption standards are used for data at rest and in transit? Are there any exceptions to encryption policies?",
+        ],
+        "access_control": [
+            "What access control and authentication mechanisms are in place? How is privileged access managed?",
+        ],
+        "data_retention": [
+            "What are the data retention and deletion policies? How is data deletion handled?",
+        ],
+        "monitoring": [
+            "What security monitoring tools and incident detection mechanisms are in place?",
+        ],
+        "subprocessors": [
+            "How are third-party service providers and subprocessors managed and monitored for compliance?",
+        ],
+    }
+
+    # Collect findings for each area
+    findings = []
+    for area, area_queries in queries.items():
+        area_results = []
+        for query in area_queries:
+            try:
+                # Get relevant pages using RAG
+                results = rag.search(query, k=2)
+
+                if results and len(results) > 0:
+                    for result in results:
+                        # Get the page number and prepare vision model input
+                        page_num = result.page_num - 1  # Convert to 0-based index
+
+                        # Prepare vision model input
+                        messages = [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "image"},
+                                    {
+                                        "type": "text",
+                                        "text": f"Analyze this page from a SOC2 report and tell me: {query}",
+                                    },
+                                ],
+                            }
+                        ]
+
+                        input_text = vision_processor.apply_chat_template(
+                            messages, add_generation_prompt=True
+                        )
+                        inputs = vision_processor(
+                            images=images[page_num],
+                            text=input_text,
+                            add_special_tokens=False,
+                            return_tensors="pt",
+                        ).to(vision_model.device)
+
+                        # Generate response
+                        output = vision_model.generate(**inputs, max_new_tokens=500)
+                        output_trimmed = [
+                            out_ids[len(in_ids) :]
+                            for in_ids, out_ids in zip(inputs.input_ids, output)
+                        ]
+                        response = vision_processor.batch_decode(
+                            output_trimmed,
+                            skip_special_tokens=True,
+                            clean_up_tokenization_spaces=False,
+                        )[0]
+
+                        area_results.append(
+                            {
+                                "query": query,
+                                "findings": response,
+                                "page_num": result.page_num,
+                            }
+                        )
+                        logger.debug(
+                            f"Query response for {area}: {query} -> {response[:100]}..."
+                        )
+
+            except Exception as e:
+                logger.error(f"Error processing query '{query}': {str(e)}")
+                continue
+
+        # Synthesize findings for this area using GPT-4
+        if area_results:
+            try:
+                # Format findings for the prompt
+                pages = ", ".join(str(r["page_num"]) for r in area_results)
+                findings_text = "\n".join(
+                    f"- {r['findings']} (Page {r['page_num']})" for r in area_results
+                )
+
+                finding = llm.structured_predict(
+                    SOC2Finding,
+                    SOC2_FINDING_PROMPT,
+                    area=area,
+                    pages=pages,
+                    findings=findings_text,
+                )
+                findings.append(finding)
+                logger.info(f"Synthesized finding for {area}: {finding}")
+            except Exception as e:
+                logger.error(f"Error synthesizing findings for area '{area}': {str(e)}")
+                findings.append(
+                    SOC2Finding(
+                        area=area,
+                        finding="Unable to analyze findings",
+                        risk_level="High",
+                        gdpr_relevance="Analysis failed - manual review required",
+                    )
+                )
+
+    # Get metadata about the report using vision model
+    metadata = {"vendor_name": "Unknown", "report_period": "Unknown"}
+    metadata_queries = {
+        "vendor_name": "What is the name of the service organization covered by this report?",
+        "report_period": "What period does this SOC2 report cover?",
+    }
+
+    for key, query in metadata_queries.items():
+        try:
+            results = rag.search(query, k=1)
+            if results and len(results) > 0:
+                result = results[0]
+                page_num = result.page_num - 1
+
+                # Prepare vision model input for metadata
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image"},
+                            {"type": "text", "text": query},
+                        ],
+                    }
+                ]
+
+                input_text = vision_processor.apply_chat_template(
+                    messages, add_generation_prompt=True
+                )
+                inputs = vision_processor(
+                    images=images[page_num],
+                    text=input_text,
+                    add_special_tokens=False,
+                    return_tensors="pt",
+                ).to(vision_model.device)
+
+                # Generate response
+                output = vision_model.generate(**inputs, max_new_tokens=500)
+                output_trimmed = [
+                    out_ids[len(in_ids) :]
+                    for in_ids, out_ids in zip(inputs.input_ids, output)
+                ]
+                response = vision_processor.batch_decode(
+                    output_trimmed,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=False,
+                )[0]
+
+                metadata[key] = response.strip()
+                logger.info(f"Extracted metadata - {key}: {metadata[key]}")
+
+        except Exception as e:
+            logger.error(f"Error getting metadata for '{key}': {str(e)}")
+            metadata[key] = "Unknown"
+
+    # Create final analysis result
+    analysis = SOC2AnalysisResult(
+        vendor_name=metadata["vendor_name"],
+        analysis_date=datetime.now().strftime("%Y-%m-%d"),
+        report_period=metadata["report_period"],
+        key_findings=findings,
+        overall_risk_assessment=_generate_overall_assessment(findings),
+    )
+
+    logger.info(f"Completed SOC2 analysis with {len(findings)} findings")
+
+    # Log analysis metrics
+    log_metadata(
+        metadata={
+            "num_findings": len(findings),
+            "areas_analyzed": list(queries.keys()),
+            "vendor": analysis.vendor_name,
+        },
+        infer_artifact=True,
+    )
+
+    return analysis
+
+
+def _generate_overall_assessment(findings: List[SOC2Finding]) -> str:
+    """Generate an overall risk assessment based on individual findings"""
+    risk_levels = [f.risk_level for f in findings]
+    high_risks = risk_levels.count("High")
+    medium_risks = risk_levels.count("Medium")
+
+    if high_risks > 0:
+        return f"High Risk: Found {high_risks} high-risk and {medium_risks} medium-risk findings that require attention."
+    elif medium_risks > 0:
+        return f"Medium Risk: Found {medium_risks} medium-risk findings that should be reviewed."
+    else:
+        return "Low Risk: No significant compliance concerns identified."
+
 
 CONTRACT_EXTRACT_PROMPT = PromptTemplate(
     """\
@@ -252,7 +547,9 @@ def process_clauses(
 
 
 def generate_html_report(
-    report: ComplianceReport, checks: List[ClauseComplianceCheck]
+    report: ComplianceReport,
+    checks: List[ClauseComplianceCheck],
+    soc2_analysis: Optional[SOC2AnalysisResult] = None,
 ) -> HTMLString:
     """Generate interactive HTML report"""
     html_content = """
@@ -264,10 +561,51 @@ def generate_html_report(
     html_content += f"""
         <div class='summary'>
             <h2>Summary</h2>
-            <p><strong>Vendor:</strong> {report.vendor_name or "Not specified"}</p>
             <p><strong>Overall Status:</strong> {"✅ Compliant" if report.overall_compliant else "❌ Non-compliant"}</p>
             <p><strong>Notes:</strong> {report.summary_notes or "No additional notes"}</p>
         </div>
+    """
+
+    # Add SOC2 analysis section if available
+    if soc2_analysis:
+        html_content += f"""
+            <div class='soc2-analysis'>
+                <h2>SOC2 Technical Controls Analysis</h2>
+                <div class='summary'>
+                    <p><strong>Analysis Date:</strong> {soc2_analysis.analysis_date}</p>
+                    <p><strong>Overall Risk Assessment:</strong> {soc2_analysis.overall_risk_assessment}</p>
+                </div>
+                <div class='findings'>
+                    <h3>Key Findings</h3>
+                    <div class='findings-grid'>
+        """
+
+        # Risk level color coding
+        risk_colors = {"Low": "#4CAF50", "Medium": "#FFC107", "High": "#F44336"}
+
+        for finding in soc2_analysis.key_findings:
+            risk_color = risk_colors.get(finding.risk_level, "#9E9E9E")
+            html_content += f"""
+                <div class='finding-card'>
+                    <div class='finding-header' style='background-color: {risk_color}'>
+                        <h4>{finding.area}</h4>
+                        <span class='risk-level'>{finding.risk_level} Risk</span>
+                    </div>
+                    <div class='finding-content'>
+                        <p><strong>Finding:</strong> {finding.finding}</p>
+                        <p><strong>GDPR Relevance:</strong> {finding.gdpr_relevance}</p>
+                    </div>
+                </div>
+            """
+
+        html_content += """
+                    </div>
+                </div>
+            </div>
+        """
+
+    # Add clause analysis section
+    html_content += """
         <h2>Detailed Clause Analysis</h2>
         <div class='dashboard'>
     """
@@ -285,9 +623,17 @@ def generate_html_report(
     html_content += """
         </div>
         <style>
+            body { font-family: system-ui, -apple-system, sans-serif; line-height: 1.5; }
             .summary { padding: 1rem; margin-bottom: 2rem; background: #f5f5f5; border-radius: 4px; }
             .dashboard { display: grid; gap: 1rem; }
             .clause { padding: 1rem; border: 1px solid #ccc; border-radius: 4px; }
+            .soc2-analysis { margin: 2rem 0; }
+            .findings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; margin: 1rem 0; }
+            .finding-card { border: 1px solid #ccc; border-radius: 4px; overflow: hidden; background: white; }
+            .finding-header { padding: 0.75rem; color: white; display: flex; justify-content: space-between; align-items: center; }
+            .finding-header h4 { margin: 0; }
+            .finding-content { padding: 1rem; }
+            .risk-level { font-weight: bold; }
         </style>
     </body></html>
     """
@@ -295,13 +641,14 @@ def generate_html_report(
     return HTMLString(html_content)
 
 
-@step
+@step(experiment_tracker="wandb_weave")
 def generate_report(
     checks: Annotated[List[ClauseComplianceCheck], "compliance_check_results"],
     extraction: Annotated[ContractExtraction, "extracted_contract_data"],
+    soc2_analysis: Optional[SOC2AnalysisResult] = None,
 ) -> Tuple[
     Annotated[ComplianceReport, "final_compliance_report"],
-    Annotated[HTMLString, "html_compliance_report"],
+    Annotated[HTMLString, "html_report"],
 ]:
     """Generate final compliance report"""
     non_compliant = [c for c in checks if not c.compliant]
@@ -311,19 +658,37 @@ def generate_report(
         summary_notes=f"Found {len(non_compliant)} non-compliant clauses",
     )
 
-    return report, generate_html_report(report, checks)
+    # Add SOC2 analysis to the report
+    if soc2_analysis:
+        report.vendor_name = soc2_analysis.vendor_name
+        report.overall_compliant = len(non_compliant) == 0
+        report.summary_notes = f"Found {len(non_compliant)} non-compliant clauses. SOC2 analysis: {soc2_analysis.overall_risk_assessment}"
+
+    return report, generate_html_report(report, checks, soc2_analysis)
 
 
 # Define pipeline
 @pipeline
-def contract_review_pipeline():
+def contract_review_pipeline(
+    contract_path: str = "data/vendor_agreement.md", soc2_path: Optional[str] = None
+):
+    """Enhanced contract review pipeline with optional SOC2 analysis"""
     guideline_index = ingest_guidelines()
-    contract_docs = ingest_contract("data/vendor_agreement.md")
+    contract_docs = ingest_contract(contract_path)
     extraction = extract_clauses(contract_docs)
     checks = process_clauses(extraction, guideline_index)
-    report, html = generate_report(checks, extraction)
+
+    # Optional SOC2 analysis
+    soc2_analysis = None
+    if soc2_path:
+        soc2_analysis = analyze_soc2_report(soc2_path)
+
+    report, html = generate_report(checks, extraction, soc2_analysis)
     return report, html
 
 
 if __name__ == "__main__":
-    contract_review_pipeline()
+    # Example usage with SOC2 analysis
+    contract_review_pipeline(
+        contract_path="data/vendor_agreement.md", soc2_path="data/kolide-soc2.pdf"
+    )
