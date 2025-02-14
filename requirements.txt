@@ -1,12 +1,11 @@
-wandb
-llama_index
-pydantic>=2.6.1
-zenml>=0.55.2
+wandb>=0.15.0
+llama-index>=0.9.0
+pydantic>=2.0.0
+zenml>=0.55.0
 huggingface_hub>=0.20.3
-pdf2image>=1.16.3
+pdf2image>=1.16.0
 Pillow>=10.2.0
-# plotly>=5.18.0
-# pandas>=2.2.0
-# python-poppler>=0.4.1
 byaldi
 weave
+transformers
+torch
