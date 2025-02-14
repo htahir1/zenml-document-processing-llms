@@ -279,6 +279,8 @@ def _generate_overall_assessment(findings: List[SOC2Finding]) -> str:
         return "Low Risk: No significant compliance concerns identified."
 
 
+WANDB_PROJECT = "zenml_llms"
+
 CONTRACT_EXTRACT_PROMPT = PromptTemplate(
     """\
 You are given contract data below. \
@@ -659,6 +661,8 @@ def contract_review_pipeline(
 
 if __name__ == "__main__":
     # Example usage with SOC2 analysis
-    contract_review_pipeline(
-        contract_path="data/vendor_agreement.md", soc2_path="data/kolide-soc2.pdf"
+    contract_review_pipeline.with_options(config_path="configs/agent.yaml")(
+        contract_path="data/vendor_agreement.md",
+        soc2_path="data/kolide-soc2.pdf",
+        
     )
