@@ -21,6 +21,8 @@ from zenml import log_metadata, pipeline, step
 from zenml.client import Client
 from zenml.types import HTMLString
 
+from constants import COMPUTED_RESULTS
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 handler = logging.StreamHandler()
@@ -31,13 +33,14 @@ logger.addHandler(handler)
 
 llm = LlamaIndexOpenAI(model="gpt-4")
 
-WANDB_PROJECT = "zenml_llms"
+# WANDB_PROJECT = "zenml_llms"
+WANDB_PROJECT = "zenml-document-processing-llms"
 ENDPOINT_NAME = "llama-3-2-11b-vision-instruc-egg"
 
 
 def execute_colpali_rag(soc2_path: str):
-    from byaldi import RAGMultiModalModel 
-    
+    from byaldi import RAGMultiModalModel
+
     # Initialize Colpali RAG and index the PDF
     device_type = "cuda" if torch.cuda.is_available() else "cpu"
     rag = RAGMultiModalModel.from_pretrained("vidore/colpali", device=device_type)
@@ -115,18 +118,18 @@ Create a finding that includes:
 @step(experiment_tracker="wandb_weave")
 def analyze_soc2_report(
     soc2_path: str,
-    do_colpali_rag: bool = True,
+    colpali_demo_mode: bool = True,
 ) -> Annotated[SOC2AnalysisResult, "soc2_analysis"]:
     """Analyze SOC2 report using Colpali RAG and HF-based vision inference endpoint"""
     weave.init(project_name=WANDB_PROJECT)
 
     logger.info(f"Starting SOC2 analysis for {soc2_path}")
 
-    # Convert PDF to images
     images = convert_from_path(soc2_path)
     logger.info(f"Converted PDF to {len(images)} images")
 
-    if do_colpali_rag:
+    rag = None
+    if not colpali_demo_mode:
         rag = execute_colpali_rag(soc2_path)
 
     # Standard queries for SOC2 analysis
@@ -162,7 +165,7 @@ def analyze_soc2_report(
                     results = rag.search(query, k=3)
                 else:
                     # load from disk
-                    pass
+                    results = COMPUTED_RESULTS[area]
 
                 if results and len(results) > 0:
                     hf_api = HfApi()
@@ -654,7 +657,9 @@ def generate_report(
 
 @pipeline(enable_cache=False)
 def contract_review_pipeline(
-    contract_path: str = "data/vendor_agreement.md", soc2_path: Optional[str] = None
+    contract_path: str = "data/vendor_agreement.md",
+    soc2_path: Optional[str] = None,
+    colpali_demo_mode: bool = True,
 ):
     """Enhanced contract review pipeline with optional SOC2 analysis"""
     guideline_index = ingest_guidelines()
@@ -664,7 +669,7 @@ def contract_review_pipeline(
 
     soc2_analysis = None
     if soc2_path:
-        soc2_analysis = analyze_soc2_report(soc2_path)
+        soc2_analysis = analyze_soc2_report(soc2_path, colpali_demo_mode)
 
     report, html = generate_report(checks, extraction, soc2_analysis)
     return report, html
@@ -672,5 +677,7 @@ def contract_review_pipeline(
 
 if __name__ == "__main__":
     contract_review_pipeline.with_options(config_path="configs/agent.yaml")(
-        contract_path="data/vendor_agreement.md", soc2_path="data/kolide-soc2.pdf"
+        contract_path="data/vendor_agreement.md",
+        soc2_path="data/kolide-soc2.pdf",
+        colpali_demo_mode=True,
     )
