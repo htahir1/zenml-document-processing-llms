@@ -665,6 +665,19 @@ kubernetes_settings = KubernetesOrchestratorSettings(
                 "memory": "1Gi",
             },
         },
+        "affinity": {
+            "nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [
+                        {
+                            "matchExpressions": [
+                                {"key": "gpu", "operator": "In", "values": ["yes"]}
+                            ]
+                        }
+                    ]
+                }
+            }
+        },
     },
     orchestrator_pod_settings={
         "resources": {
@@ -681,7 +694,8 @@ kubernetes_settings = KubernetesOrchestratorSettings(
     settings={
         "docker": docker_settings,
         "orchestrator": kubernetes_settings,
-    }
+    },
+    enable_cache=False,
 )
 def contract_review_pipeline(
     contract_path: str = "data/vendor_agreement.md", soc2_path: Optional[str] = None
