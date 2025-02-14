@@ -7,7 +7,6 @@ from typing import Annotated, List, Optional, Tuple
 
 import torch
 import weave
-from byaldi import RAGMultiModalModel
 from huggingface_hub import HfApi
 from llama_index.core import SimpleDirectoryReader, VectorStoreIndex
 from llama_index.core.prompts import PromptTemplate
@@ -34,6 +33,21 @@ llm = LlamaIndexOpenAI(model="gpt-4")
 
 WANDB_PROJECT = "zenml_llms"
 ENDPOINT_NAME = "llama-3-2-11b-vision-instruc-egg"
+
+
+def execute_colpali_rag(soc2_path: str):
+    from byaldi import RAGMultiModalModel 
+    
+    # Initialize Colpali RAG and index the PDF
+    device_type = "cuda" if torch.cuda.is_available() else "cpu"
+    rag = RAGMultiModalModel.from_pretrained("vidore/colpali", device=device_type)
+    rag.index(
+        input_path=soc2_path,
+        index_name="soc2_analysis",
+        overwrite=True,
+    )
+    logger.info("Initialized RAG model and indexed document")
+    return rag
 
 
 def encode_image_to_base64(image) -> str:
@@ -101,6 +115,7 @@ Create a finding that includes:
 @step(experiment_tracker="wandb_weave")
 def analyze_soc2_report(
     soc2_path: str,
+    do_colpali_rag: bool = True,
 ) -> Annotated[SOC2AnalysisResult, "soc2_analysis"]:
     """Analyze SOC2 report using Colpali RAG and HF-based vision inference endpoint"""
     weave.init(project_name=WANDB_PROJECT)
@@ -111,15 +126,8 @@ def analyze_soc2_report(
     images = convert_from_path(soc2_path)
     logger.info(f"Converted PDF to {len(images)} images")
 
-    # Initialize Colpali RAG and index the PDF
-    device_type = "cuda" if torch.cuda.is_available() else "cpu"
-    rag = RAGMultiModalModel.from_pretrained("vidore/colpali", device=device_type)
-    rag.index(
-        input_path=soc2_path,
-        index_name="soc2_analysis",
-        overwrite=True,
-    )
-    logger.info("Initialized RAG model and indexed document")
+    if do_colpali_rag:
+        rag = execute_colpali_rag(soc2_path)
 
     # Standard queries for SOC2 analysis
     queries = {
@@ -149,8 +157,12 @@ def analyze_soc2_report(
         area_results = []
         for query in area_queries:
             try:
-                # Get relevant pages using RAG
-                results = rag.search(query, k=3)
+                if rag:
+                    # Get relevant pages using RAG
+                    results = rag.search(query, k=3)
+                else:
+                    # load from disk
+                    pass
 
                 if results and len(results) > 0:
                     hf_api = HfApi()
