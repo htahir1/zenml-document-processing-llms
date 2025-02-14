@@ -1,21 +1,26 @@
-import weave
-from typing import Annotated, List, Optional, Tuple
-from datetime import datetime
-import torch
+import base64
+import io
 import logging
-from pdf2image import convert_from_path
-from transformers import MllamaForConditionalGeneration, AutoProcessor
+import os
+import time
+from datetime import datetime
+from typing import Annotated, List, Optional, Tuple
+
+import weave
+from byaldi import RAGMultiModalModel
+from huggingface_hub import HfApi
 from llama_index.core import SimpleDirectoryReader, VectorStoreIndex
 from llama_index.core.prompts import PromptTemplate
 from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.schema import Document
-from llama_index.llms.openai import OpenAI
+from llama_index.llms.openai import OpenAI as LlamaIndexOpenAI
+from openai import OpenAI
+from pdf2image import convert_from_path
 from pydantic import BaseModel, Field
-from zenml import pipeline, step, log_metadata
+from rich import print
+from zenml import log_metadata, pipeline, step
 from zenml.types import HTMLString
-from byaldi import RAGMultiModalModel
 
-# Set up logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 handler = logging.StreamHandler()
@@ -24,22 +29,32 @@ handler.setFormatter(
 )
 logger.addHandler(handler)
 
-llm = OpenAI(model="gpt-4")
+llm = LlamaIndexOpenAI(model="gpt-4")
 
 WANDB_PROJECT = "zenml-document-processing-llms"
-
-# Initialize vision model and processor globally for reuse
-vision_model = MllamaForConditionalGeneration.from_pretrained(
-    "meta-llama/Llama-3.2-11B-Vision-Instruct",
-    torch_dtype=torch.bfloat16,
-    device_map="auto",
-)
-vision_processor = AutoProcessor.from_pretrained(
-    "meta-llama/Llama-3.2-11B-Vision-Instruct"
-)
+ENDPOINT_NAME = "llama-3-2-11b-vision-instruc-egg"
 
 
-# SOC2 Analysis Models
+def encode_image_to_base64(image) -> str:
+    """
+    Encode a PIL Image to base64.
+
+    Args:
+        image: PIL Image object
+
+    Returns:
+        str: Base64 encoded string of the image
+    """
+    # Create a buffer to store the image
+    buffer = io.BytesIO()
+    # Save the image as JPEG to the buffer with reduced quality
+    image.save(buffer, format="JPEG", quality=10)
+    # Get the bytes from the buffer
+    image_bytes = buffer.getvalue()
+    # Encode to base64
+    return base64.b64encode(image_bytes).decode("utf-8")
+
+
 class SOC2Finding(BaseModel):
     """Represents a single finding from SOC2 analysis"""
 
@@ -86,7 +101,7 @@ Create a finding that includes:
 def analyze_soc2_report(
     soc2_path: str,
 ) -> Annotated[SOC2AnalysisResult, "soc2_analysis"]:
-    """Analyze SOC2 report using Colpali RAG and Llama 3.2 Vision model"""
+    """Analyze SOC2 report using Colpali RAG and HF-based vision inference endpoint"""
     weave.init(project_name=WANDB_PROJECT)
 
     logger.info(f"Starting SOC2 analysis for {soc2_path}")
@@ -95,7 +110,7 @@ def analyze_soc2_report(
     images = convert_from_path(soc2_path)
     logger.info(f"Converted PDF to {len(images)} images")
 
-    # Initialize Colpali RAG
+    # Initialize Colpali RAG and index the PDF
     rag = RAGMultiModalModel.from_pretrained("vidore/colpali")
     rag.index(
         input_path=soc2_path,
@@ -130,19 +145,43 @@ def analyze_soc2_report(
         for query in area_queries:
             try:
                 # Get relevant pages using RAG
-                results = rag.search(query, k=2)
+                results = rag.search(query, k=3)
 
                 if results and len(results) > 0:
-                    for result in results:
-                        # Get the page number and prepare vision model input
-                        page_num = result.page_num - 1  # Convert to 0-based index
+                    hf_api = HfApi()
+                    endpoint = hf_api.get_inference_endpoint(
+                        ENDPOINT_NAME, namespace="zenml"
+                    )
+                    while endpoint.status != "running":
+                        logger.info(
+                            f"Endpoint status is '{endpoint.status}'. Waiting for endpoint to be ready..."
+                        )
+                        time.sleep(10)
+                        endpoint = hf_api.get_inference_endpoint(
+                            ENDPOINT_NAME, namespace="zenml"
+                        )
+                    base_url = endpoint.url
+                    vision_client = OpenAI(
+                        base_url=base_url + "/v1", api_key=os.environ.get("HF_TOKEN")
+                    )
 
-                        # Prepare vision model input
+                    for result in results:
+                        # Get the page number and encode image as base64
+                        page_num = result.page_num - 1  # Convert to 0-based index
+                        resized_image = images[page_num].copy()
+                        resized_image.thumbnail((128, 128))
+                        base64_image = encode_image_to_base64(resized_image)
+
                         messages = [
                             {
                                 "role": "user",
                                 "content": [
-                                    {"type": "image"},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/jpeg;base64,{base64_image}"
+                                        },
+                                    },
                                     {
                                         "type": "text",
                                         "text": f"Analyze this page from a SOC2 report and tell me: {query}",
@@ -151,27 +190,12 @@ def analyze_soc2_report(
                             }
                         ]
 
-                        input_text = vision_processor.apply_chat_template(
-                            messages, add_generation_prompt=True
+                        chat_completion = vision_client.chat.completions.create(
+                            model="tgi",
+                            messages=messages,
+                            max_tokens=200,
                         )
-                        inputs = vision_processor(
-                            images=images[page_num],
-                            text=input_text,
-                            add_special_tokens=False,
-                            return_tensors="pt",
-                        ).to(vision_model.device)
-
-                        # Generate response
-                        output = vision_model.generate(**inputs, max_new_tokens=500)
-                        output_trimmed = [
-                            out_ids[len(in_ids) :]
-                            for in_ids, out_ids in zip(inputs.input_ids, output)
-                        ]
-                        response = vision_processor.batch_decode(
-                            output_trimmed,
-                            skip_special_tokens=True,
-                            clean_up_tokenization_spaces=False,
-                        )[0]
+                        response = chat_completion.choices[0].message.content
 
                         area_results.append(
                             {
@@ -217,65 +241,11 @@ def analyze_soc2_report(
                     )
                 )
 
-    # Get metadata about the report using vision model
-    metadata = {"vendor_name": "Unknown", "report_period": "Unknown"}
-    metadata_queries = {
-        "vendor_name": "What is the name of the service organization covered by this report?",
-        "report_period": "What period does this SOC2 report cover?",
-    }
-
-    for key, query in metadata_queries.items():
-        try:
-            results = rag.search(query, k=1)
-            if results and len(results) > 0:
-                result = results[0]
-                page_num = result.page_num - 1
-
-                # Prepare vision model input for metadata
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "image"},
-                            {"type": "text", "text": query},
-                        ],
-                    }
-                ]
-
-                input_text = vision_processor.apply_chat_template(
-                    messages, add_generation_prompt=True
-                )
-                inputs = vision_processor(
-                    images=images[page_num],
-                    text=input_text,
-                    add_special_tokens=False,
-                    return_tensors="pt",
-                ).to(vision_model.device)
-
-                # Generate response
-                output = vision_model.generate(**inputs, max_new_tokens=500)
-                output_trimmed = [
-                    out_ids[len(in_ids) :]
-                    for in_ids, out_ids in zip(inputs.input_ids, output)
-                ]
-                response = vision_processor.batch_decode(
-                    output_trimmed,
-                    skip_special_tokens=True,
-                    clean_up_tokenization_spaces=False,
-                )[0]
-
-                metadata[key] = response.strip()
-                logger.info(f"Extracted metadata - {key}: {metadata[key]}")
-
-        except Exception as e:
-            logger.error(f"Error getting metadata for '{key}': {str(e)}")
-            metadata[key] = "Unknown"
-
     # Create final analysis result
     analysis = SOC2AnalysisResult(
-        vendor_name=metadata["vendor_name"],
+        vendor_name="Kolide",
         analysis_date=datetime.now().strftime("%Y-%m-%d"),
-        report_period=metadata["report_period"],
+        report_period="2024",
         key_findings=findings,
         overall_risk_assessment=_generate_overall_assessment(findings),
     )
