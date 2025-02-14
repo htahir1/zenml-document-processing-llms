@@ -716,10 +716,7 @@ def contract_review_pipeline(
 
 
 if __name__ == "__main__":
-    # Example usage with SOC2 analysis
-    # contract_review_pipeline.with_options(config_path="configs/agent.yaml")(
-    #     contract_path="data/vendor_agreement.md", soc2_path="data/kolide-soc2.pdf"
-    # )
-    contract_review_pipeline(
-        contract_path="data/vendor_agreement.md", soc2_path="data/kolide-soc2.pdf"
+    contract_review_pipeline.with_options(config_path="configs/agent.yaml")(
+        contract_path="data/vendor_agreement.md",
+        soc2_path="data/kolide-soc2.pdf",
     )
