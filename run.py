@@ -1,11 +1,11 @@
 import base64
 import io
 import logging
-import os
 import time
 from datetime import datetime
 from typing import Annotated, List, Optional, Tuple
 
+import torch
 import weave
 from byaldi import RAGMultiModalModel
 from huggingface_hub import HfApi
@@ -19,6 +19,7 @@ from pdf2image import convert_from_path
 from pydantic import BaseModel, Field
 from rich import print
 from zenml import log_metadata, pipeline, step
+from zenml.client import Client
 from zenml.types import HTMLString
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,7 @@ logger.addHandler(handler)
 
 llm = LlamaIndexOpenAI(model="gpt-4")
 
-WANDB_PROJECT = "zenml-document-processing-llms"
+WANDB_PROJECT = "zenml_llms"
 ENDPOINT_NAME = "llama-3-2-11b-vision-instruc-egg"
 
 
@@ -111,7 +112,8 @@ def analyze_soc2_report(
     logger.info(f"Converted PDF to {len(images)} images")
 
     # Initialize Colpali RAG and index the PDF
-    rag = RAGMultiModalModel.from_pretrained("vidore/colpali")
+    device_type = "cuda" if torch.cuda.is_available() else "cpu"
+    rag = RAGMultiModalModel.from_pretrained("vidore/colpali", device=device_type)
     rag.index(
         input_path=soc2_path,
         index_name="soc2_analysis",
@@ -138,6 +140,9 @@ def analyze_soc2_report(
         ],
     }
 
+    zenml_client = Client()
+    hf_token = zenml_client.get_secret("huggingface_creds").secret_values["token"]
+
     # Collect findings for each area
     findings = []
     for area, area_queries in queries.items():
@@ -161,9 +166,7 @@ def analyze_soc2_report(
                             ENDPOINT_NAME, namespace="zenml"
                         )
                     base_url = endpoint.url
-                    vision_client = OpenAI(
-                        base_url=base_url + "/v1", api_key=os.environ.get("HF_TOKEN")
-                    )
+                    vision_client = OpenAI(base_url=base_url + "/v1", api_key=hf_token)
 
                     for result in results:
                         # Get the page number and encode image as base64
@@ -278,8 +281,6 @@ def _generate_overall_assessment(findings: List[SOC2Finding]) -> str:
     else:
         return "Low Risk: No significant compliance concerns identified."
 
-
-WANDB_PROJECT = "zenml_llms"
 
 CONTRACT_EXTRACT_PROMPT = PromptTemplate(
     """\
@@ -639,8 +640,7 @@ def generate_report(
     return report, generate_html_report(report, checks, soc2_analysis)
 
 
-# Define pipeline
-@pipeline
+@pipeline(enable_cache=False)
 def contract_review_pipeline(
     contract_path: str = "data/vendor_agreement.md", soc2_path: Optional[str] = None
 ):
@@ -650,7 +650,6 @@ def contract_review_pipeline(
     extraction = extract_clauses(contract_docs)
     checks = process_clauses(extraction, guideline_index)
 
-    # Optional SOC2 analysis
     soc2_analysis = None
     if soc2_path:
         soc2_analysis = analyze_soc2_report(soc2_path)
@@ -660,9 +659,6 @@ def contract_review_pipeline(
 
 
 if __name__ == "__main__":
-    # Example usage with SOC2 analysis
     contract_review_pipeline.with_options(config_path="configs/agent.yaml")(
-        contract_path="data/vendor_agreement.md",
-        soc2_path="data/kolide-soc2.pdf",
-        
+        contract_path="data/vendor_agreement.md", soc2_path="data/kolide-soc2.pdf"
     )
