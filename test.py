@@ -74,7 +74,7 @@ def main() -> None:
 
     # Create a resized copy to reduce file size
     resized_image = selected_image.copy()
-    resized_image.thumbnail((128, 128))  # Reduce resolution
+    resized_image.thumbnail((64, 64))  # Reduce resolution
 
     # Convert image to base64
     base64_image = encode_image_to_base64(resized_image)
@@ -84,7 +84,7 @@ def main() -> None:
     base_url = endpoint.url
     # Initialize OpenAI client with Hugging Face endpoint
     client = OpenAI(
-        base_url=base_url,
+        base_url=base_url + "/v1",
         api_key=os.environ.get("HF_TOKEN"),
     )
 
