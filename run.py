@@ -34,7 +34,7 @@ logger.addHandler(handler)
 llm = LlamaIndexOpenAI(model="gpt-4")
 
 WANDB_PROJECT = "zenml_llms"
-# WANDB_PROJECT = "zenml-document-processing-llms"
+# WANDB_PROJECT = "zenml-document-processing-llms" # for use on the other tenant
 ENDPOINT_NAME = "llama-3-2-11b-vision-instruc-egg"
 
 
